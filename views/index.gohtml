@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+    <head>
+        <title>Hacker News Clone</title>
+    </head>
+    <body>
+        <h1>Hacker News Clone</h1>
+        <ol>
+            {{range .HNItems}}
+                <li>
+                    <a href="{{.Url}}">{{.Title}}</a>
+                    <p>{{.Text}}</p>
+                </li>
+            {{end}}
+        </ol>
+    </body>
+</html>
