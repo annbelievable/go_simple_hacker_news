@@ -1,8 +1,3 @@
-/*
-REFERENCES:
-1) https://github.com/HackerNews/API1
-*/
-
 package main
 
 import (
@@ -12,6 +7,8 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"sort"
+	"sync"
 )
 
 const (
@@ -21,11 +18,12 @@ const (
 var templates = template.Must(template.ParseFiles("./views/index.gohtml"))
 
 type HNItem struct {
-	Id       int    `json:"id"`
-	Title    string `json:"title"`
-	Text     string `json:"text"`
-	Url      string `json:"url"`
-	PostType string `json:"type"`
+	Id        int    `json:"id"`
+	Title     string `json:"title"`
+	Text      string `json:"text"`
+	Url       string `json:"url"`
+	PostType  string `json:"type"`
+	SortOrder int
 	// Author      string    `json:"by"`
 	// TimeCreated time.Time `json:"time"`
 }
@@ -44,6 +42,13 @@ func TopStoriesHandler(w http.ResponseWriter, r *http.Request) {
 	var HNItems []HNItem
 
 	HNItems = GetTopStories()
+
+	//sort the stories according to order
+	sort.Slice(HNItems[:], func(i, j int) bool {
+		return HNItems[i].SortOrder < HNItems[j].SortOrder
+	})
+
+	HNItems = HNItems[:30]
 
 	data := struct {
 		HNItems []HNItem
@@ -76,17 +81,42 @@ func GetTopStories() []HNItem {
 
 	json.Unmarshal(bodyBytes, &ids)
 
-	//get the top 30 stories
-	i := 0
-	for len(HNItems) < 30 {
-		itemData, _ := GetItemData(ids[i])
-		if itemData.PostType == "story" {
-			HNItems = append(HNItems, itemData)
+	//use go routine and channel here to get the top 30 stories
+	var wg sync.WaitGroup
+	ch := make(chan HNItem)
+	for i := 0; i < 40; i++ {
+		wg.Add(1)
+		go GetAndStoreData(ch, ids[i], i, &wg)
+	}
+
+	//wrapping the waitgroup and close channel in a goroutine is important
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	for {
+		res, ok := <-ch
+		if ok == false {
+			break
 		}
-		i++
+		HNItems = append(HNItems, res)
 	}
 
 	return HNItems
+}
+
+func GetAndStoreData(ch chan HNItem, id int, order int, wg *sync.WaitGroup) {
+	defer wg.Done()
+	item, err := GetItemData(id)
+	if err != nil {
+		fmt.Println(err.Error())
+	} else {
+		if item.PostType == "story" && len(item.Url) > 0 {
+			item.SortOrder = order
+			ch <- item
+		}
+	}
 }
 
 func GetItemData(id int) (HNItem, error) {
