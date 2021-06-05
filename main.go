@@ -2,13 +2,18 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"sort"
+	"strconv"
 	"sync"
+	"time"
+
+	cache "github.com/patrickmn/go-cache"
 )
 
 const (
@@ -16,6 +21,7 @@ const (
 )
 
 var templates = template.Must(template.ParseFiles("./views/index.gohtml"))
+var goCache = cache.New(5*time.Minute, 10*time.Minute)
 
 type HNItem struct {
 	Id        int    `json:"id"`
@@ -41,14 +47,22 @@ func Start() {
 func TopStoriesHandler(w http.ResponseWriter, r *http.Request) {
 	var HNItems []HNItem
 
-	HNItems = GetTopStories()
+	//if there is any error occured, display a different template
+	HNItems, err := GetTopStories()
 
-	//sort the stories according to order
-	sort.Slice(HNItems[:], func(i, j int) bool {
-		return HNItems[i].SortOrder < HNItems[j].SortOrder
-	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-	HNItems = HNItems[:30]
+	if len(HNItems) > 1 {
+		//sort the stories according to order
+		sort.Slice(HNItems[:], func(i, j int) bool {
+			return HNItems[i].SortOrder < HNItems[j].SortOrder
+		})
+		//get only 30 items
+		HNItems = HNItems[:30]
+	}
 
 	data := struct {
 		HNItems []HNItem
@@ -56,30 +70,41 @@ func TopStoriesHandler(w http.ResponseWriter, r *http.Request) {
 		HNItems: HNItems,
 	}
 
-	err := templates.ExecuteTemplate(w, "index.gohtml", data)
+	err = templates.ExecuteTemplate(w, "index.gohtml", data)
+
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
 
-func GetTopStories() []HNItem {
+//update the func to return error too
+func GetTopStories() ([]HNItem, error) {
 	var ids []int
 	var HNItems []HNItem
 
 	//top stories api url:
 	topStoriesApi := apiBase + "/topstories.json"
 
+	//returns an array of 500 ids
 	resp, err := http.Get(topStoriesApi)
 	if err != nil {
-		fmt.Println("An error occured when calling the API.")
+		return HNItems, err
+	}
+
+	if resp.StatusCode != 200 {
+		return HNItems, errors.New("Issue with calling top stories API.")
 	}
 
 	defer resp.Body.Close()
+	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return HNItems, err
+	}
 
-	//returns an array of 500 ids
-	bodyBytes, _ := ioutil.ReadAll(resp.Body)
-
-	json.Unmarshal(bodyBytes, &ids)
+	err = json.Unmarshal(bodyBytes, &ids)
+	if err != nil {
+		return HNItems, err
+	}
 
 	//use go routine and channel here to get the top 30 stories
 	var wg sync.WaitGroup
@@ -103,7 +128,7 @@ func GetTopStories() []HNItem {
 		HNItems = append(HNItems, res)
 	}
 
-	return HNItems
+	return HNItems, nil
 }
 
 func GetAndStoreData(ch chan HNItem, id int, order int, wg *sync.WaitGroup) {
@@ -121,16 +146,31 @@ func GetAndStoreData(ch chan HNItem, id int, order int, wg *sync.WaitGroup) {
 
 func GetItemData(id int) (HNItem, error) {
 	var item HNItem
+	idString := strconv.Itoa(id)
+
+	if val, found := goCache.Get(idString); found {
+		itemPointer := val.(*HNItem)
+		return *itemPointer, nil
+	}
+
 	itemApi := fmt.Sprintf("%s/item/%d.json", apiBase, id)
 	resp, err := http.Get(itemApi)
+	defer resp.Body.Close()
 	if err != nil {
 		return item, err
 	}
-	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return item, errors.New("Issue with calling item API.")
+	}
+
 	dec := json.NewDecoder(resp.Body)
 	err = dec.Decode(&item)
 	if err != nil {
 		return item, err
 	}
+
+	goCache.Set(idString, &item, cache.DefaultExpiration)
+
 	return item, nil
 }
